@@ -7,7 +7,6 @@ const Spline = struct {
     char: []const u8,
     ansi: []const u8,
     weight: f32,
-    adjacents: [3]bool,
 };
 const ANSI_COLOR_GREEN = "\x1b[32m";
 const ANSI_COLOR_YELLOW = "\x1b[33m";
@@ -19,35 +18,24 @@ const ANSI_CLEAR_SCREEN = "\x1b[2J";
 const land = Spline{
     .char = "l",
     .ansi = ANSI_COLOR_GREEN,
-    .weight = 60,
-    .adjacents = [_]bool{ true, true, false },
+    .weight = 80,
 };
 
 const coast = Spline{
     .char = "c",
     .ansi = ANSI_COLOR_YELLOW,
     .weight = 10,
-    .adjacents = [_]bool{ true, true, true },
 };
 const sea = Spline{
     .char = "s",
     .ansi = ANSI_COLOR_BLUE,
-    .weight = 20,
-    .adjacents = [_]bool{ false, true, true },
+    .weight = 40,
 };
 
 const empty = Spline{
     .char = "-",
     .ansi = ANSI_COLOR_RESET,
     .weight = 0,
-    .adjacents = [_]bool{ true, true, true },
-};
-
-const SplineEnum = enum {
-    land,
-    coast,
-    sea,
-    none,
 };
 
 const EntropyRecord = struct {
@@ -61,65 +49,66 @@ const Point = struct {
     y: usize,
 };
 
-fn selectEnum(choice: u8) !SplineEnum {
-    if (choice > 2) return error.InvalidChoice;
-    return @as(SplineEnum, @enumFromInt(choice));
-}
-
-fn selectSpline(enumValue: SplineEnum) !Spline {
-    return switch (enumValue) {
-        .land => land,
-        .coast => coast,
-        .sea => sea,
-        .none => empty,
-    };
-}
-
 const Tile = struct {
-    collapsed: SplineEnum,
+    collapsed: *const Spline,
     entropy: f32,
-    options: [3]bool,
+    options: [3]*const Spline,
     pub const init: Tile = .{
-        .collapsed = .none,
+        .collapsed = &empty,
         .entropy = std.math.floatMax(f32),
-        .options = [_]bool{ true, true, true },
+        .options = .{ &sea, &coast, &land },
     };
 };
 
 pub fn updateEntropy(tile: Tile) !f32 {
     const opts = tile.options;
     var sumWeights: f32 = 0;
-    for (opts, 0..) |opt, index| {
-        if (opt) {
-            const en = try selectEnum(@as(u8, @intCast(index)));
-            const spline = try selectSpline(en);
-            sumWeights += spline.weight;
-        }
+    for (opts) |opt| {
+        sumWeights += opt.weight;
     }
     const logSum = std.math.log(f32, 2, sumWeights);
 
     var weightedSum: f32 = 0;
-    for (opts, 0..) |opt, index| {
-        if (opt) {
-            const i = @as(u8, @intCast(index));
-            const en = try selectEnum(i);
-            const spline = try selectSpline(en);
-            const weight = spline.weight;
-            const logWeight = std.math.log(f32, 2, weight);
-            weightedSum += (weight * logWeight);
-        }
+    for (opts) |opt| {
+        const weight = opt.weight;
+        const logWeight = std.math.log(f32, 2, weight);
+        weightedSum += (weight * logWeight);
     }
 
     return logSum - weightedSum / sumWeights;
 }
 
-pub fn newAdjacent(index: u8) [3]bool {
-    const adj = switch (index) {
-        0 => [_]bool{ true, true, false },
-        1 => [_]bool{ true, true, true },
-        2 => [_]bool{ false, true, true },
-        else => unreachable,
-    };
+const Orientation = enum { Top, Right, Bottom, Left };
+
+pub inline fn newAdjacent(tile: *const Spline, orientation: Orientation) [3]*const Spline {
+    var adj = [_]*const Spline{ &land, &coast, &sea };
+    if (tile.char[0] == 'l') {
+        switch (orientation) {
+            .Top => adj = [_]*const Spline{ &land, &empty, &empty },
+            .Right => adj = [_]*const Spline{ &land, &land, &coast },
+            .Bottom => adj = [_]*const Spline{ &land, &land, &coast },
+            .Left => adj = [_]*const Spline{ &land, &empty, &empty },
+        }
+    }
+
+    if (tile.char[0] == 'c') {
+        switch (orientation) {
+            .Top => adj = [_]*const Spline{ &empty, &empty, &land },
+            .Right => adj = [_]*const Spline{ &empty, &sea, &empty },
+            .Bottom => adj = [_]*const Spline{ &empty, &sea, &empty },
+            .Left => adj = [_]*const Spline{ &empty, &land, &empty },
+        }
+    }
+
+    if (tile.char[0] == 's') {
+        switch (orientation) {
+            .Top => adj = [_]*const Spline{ &empty, &coast, &empty },
+            .Right => adj = [_]*const Spline{ &empty, &sea, &empty },
+            .Bottom => adj = [_]*const Spline{ &sea, &empty, &empty },
+            .Left => adj = [_]*const Spline{ &empty, &coast, &empty },
+        }
+    }
+
     return adj;
 }
 
@@ -127,18 +116,36 @@ pub inline fn checkVisited(visitedCells: *std.AutoHashMap(Point, void), x: usize
     return visitedCells.contains(.{ .x = x, .y = y });
 }
 
-// TODO:  implmenent this shit fuckeerrr
-pub inline fn weightedRandomSelect(choices: ArrayList(u8), prng: *std.rand.Random) u8 {
-    const items = choices.items;
-    _ = prng.next();
-    const rand = prng.random();
-    rand.shuffle(u8, items);
-    return items[0];
+pub inline fn weightedRandomSelect(rand: *const std.Random, s: *const [3]*const Spline) *const Spline {
+    var total: f32 = 0;
+    var accumilativeWeight: [3]f32 = .{ 0, 0, 0 };
+
+    for (s, 0..) |w, i| {
+        if (w.weight == 0) {
+            accumilativeWeight[i] = 0;
+        }
+        total += w.weight;
+        accumilativeWeight[i] = w.weight;
+    }
+
+    const sel = rand.intRangeAtMost(i32, 0, @as(i32, @intFromFloat(total)));
+    var selected: *const Spline = &empty;
+
+    for (accumilativeWeight, 0..) |w, i| {
+        if (s[i].weight == 0) continue;
+        if (sel <= @as(i32, @intFromFloat(w))) {
+            selected = s[i];
+            break;
+        } else {
+            selected = s[i];
+        }
+    }
+    return selected;
 }
 
 pub fn main() !void {
-    const width = 50;
-    const height = 30;
+    const width = 60;
+    const height = 40;
     var collapsed: u32 = 0;
     var lowestEntropy: f32 = std.math.floatMax(f32);
     var lowestX: usize = 0;
@@ -157,6 +164,9 @@ pub fn main() !void {
         break :blk seed;
     });
 
+    lowestX = prng.random().intRangeAtMost(usize, 10, 20);
+    lowestY = prng.random().intRangeAtMost(usize, 10, 20);
+
     var visitedCells = std.AutoHashMap(Point, void).init(
         gpa,
     );
@@ -164,126 +174,15 @@ pub fn main() !void {
 
     // initiate tiles
     var tiles: [height][width]Tile = @splat(@splat(.init));
-    for (0..height) |y| {
-        for (0..width) |x| {
-            const entropy = try updateEntropy(tiles[y][x]);
-            tiles[y][x].entropy = entropy;
-            if (entropy < lowestEntropy) {
-                lowestEntropy = entropy;
-                lowestX = x;
-                lowestY = y;
-            }
-        }
-    }
 
-    var choices = ArrayList(u8).init(gpa);
     var entropyRecords = ArrayList(EntropyRecord).init(gpa);
 
     try bw_writer.writeAll(ANSI_CLEAR_SCREEN);
+    var collapsedTotal: u32 = 0;
+
+    try entropyRecords.append(.{ .entropy = 0, .x = lowestX, .y = lowestY });
 
     while (collapsed < (width * height) or entropyRecords.items.len != 0) : (collapsed += 1) {
-        const opts = tiles[lowestY][lowestX].options;
-        for (opts, 0..) |opt, index| {
-            if (opt) {
-                try choices.append(@as(u8, @intCast(index)));
-            }
-        }
-        // _ = prng.next();
-        const rand = prng.random();
-
-        const items = choices.items;
-        rand.shuffle(u8, items);
-        const first = items[0];
-        const en = try selectEnum(first);
-        tiles[lowestY][lowestX].collapsed = en;
-
-        const newAdj = newAdjacent(first);
-
-        // check top
-        if (lowestY > 0) {
-            const x = lowestX;
-            const y = lowestY - 1;
-
-            tiles[y][x].options = newAdj;
-            const entropy = try updateEntropy(tiles[y][x]);
-            tiles[y][x].entropy = entropy;
-
-            if (!checkVisited(&visitedCells, x, y)) {
-                try entropyRecords.append(.{
-                    .entropy = entropy,
-                    .x = x,
-                    .y = y,
-                });
-                try visitedCells.put(.{ .x = x, .y = y }, {});
-            }
-        }
-
-        // check right
-        if (lowestX < (width - 1)) {
-            const x = lowestX + 1;
-            const y = lowestY;
-            tiles[y][x].options = newAdj;
-            const entropy = try updateEntropy(tiles[y][x]);
-            tiles[y][x].entropy = entropy;
-            if (!checkVisited(&visitedCells, x, y)) {
-                try entropyRecords.append(.{
-                    .entropy = entropy,
-                    .x = x,
-                    .y = y,
-                });
-                try visitedCells.put(.{ .x = x, .y = y }, {});
-            }
-        }
-
-        // check bottom
-        if (lowestY < (height - 1)) {
-            const x = lowestX;
-            const y = lowestY + 1;
-            tiles[y][x].options = newAdj;
-            const entropy = try updateEntropy(tiles[y][x]);
-            tiles[y][x].entropy = entropy;
-            if (!checkVisited(&visitedCells, x, y)) {
-                try entropyRecords.append(.{
-                    .entropy = entropy,
-                    .x = x,
-                    .y = y,
-                });
-                try visitedCells.put(.{ .x = x, .y = y }, {});
-            }
-        }
-
-        // check left
-        if (lowestX > 0) {
-            const x = lowestX - 1;
-            const y = lowestY;
-            tiles[y][x].options = newAdj;
-            const entropy = try updateEntropy(tiles[y][x]);
-            tiles[y][x].entropy = entropy;
-            if (!checkVisited(&visitedCells, x, y)) {
-                try entropyRecords.append(.{
-                    .entropy = entropy,
-                    .x = x,
-                    .y = y,
-                });
-                try visitedCells.put(.{ .x = x, .y = y }, {});
-            }
-        }
-
-        try bw_writer.writeAll(ANSI_CURSOR_HOME);
-
-        for (0..height) |y| {
-            for (0..width) |x| {
-                const tile = tiles[y][x].collapsed;
-                const c = try selectSpline(tile);
-                try bw_writer.writeAll(c.ansi);
-                try bw_writer.writeAll(c.char);
-                try bw_writer.writeAll(ANSI_COLOR_RESET);
-            }
-            try bw_writer.writeByte('\n');
-        }
-        try bw_writer.writeByte('\n');
-
-        choices.clearRetainingCapacity();
         const enRecItems = entropyRecords.items;
         std.mem.sort(EntropyRecord, enRecItems, {}, struct {
             fn lessThan(_: void, a: EntropyRecord, b: EntropyRecord) bool {
@@ -293,10 +192,120 @@ pub fn main() !void {
         lowestEntropy = enRecItems[0].entropy;
         lowestX = enRecItems[0].x;
         lowestY = enRecItems[0].y;
-
         _ = entropyRecords.orderedRemove(0);
+        const t = tiles[lowestY][lowestX];
+
+        const rand = prng.random();
+        const selected = weightedRandomSelect(&rand, &t.options);
+
+        // check top
+        if (lowestY > 0) {
+            const x = lowestX;
+            const y = lowestY - 1;
+
+            tiles[y][x].options = newAdjacent(selected, .Top);
+            const entropy = try updateEntropy(tiles[y][x]);
+            tiles[y][x].entropy = entropy;
+
+            for (entropyRecords.items, 0..) |enRec, i| {
+                if (enRec.x == x and enRec.y == y) {
+                    entropyRecords.items[i].entropy = entropy;
+                }
+            }
+
+            if (!checkVisited(&visitedCells, x, y)) {
+                try entropyRecords.append(.{ .entropy = entropy, .x = x, .y = y });
+                try visitedCells.put(.{ .x = x, .y = y }, {});
+            }
+        }
+
+        // check right
+        if (lowestX < (width - 1)) {
+            const x = lowestX + 1;
+            const y = lowestY;
+            tiles[y][x].options = newAdjacent(selected, .Right);
+            const entropy = try updateEntropy(tiles[y][x]);
+            tiles[y][x].entropy = entropy;
+
+            for (entropyRecords.items, 0..) |enRec, i| {
+                if (enRec.x == x and enRec.y == y) {
+                    entropyRecords.items[i].entropy = entropy;
+                }
+            }
+
+            if (!checkVisited(&visitedCells, x, y)) {
+                try entropyRecords.append(.{ .entropy = entropy, .x = x, .y = y });
+                try visitedCells.put(.{ .x = x, .y = y }, {});
+            }
+        }
+
+        // check bottom
+        if (lowestY < (height - 1)) {
+            const x = lowestX;
+            const y = lowestY + 1;
+            tiles[y][x].options = newAdjacent(selected, .Bottom);
+            const entropy = try updateEntropy(tiles[y][x]);
+            tiles[y][x].entropy = entropy;
+
+            for (entropyRecords.items, 0..) |enRec, i| {
+                if (enRec.x == x and enRec.y == y) {
+                    entropyRecords.items[i].entropy = entropy;
+                }
+            }
+
+            if (!checkVisited(&visitedCells, x, y)) {
+                try entropyRecords.append(.{ .entropy = entropy, .x = x, .y = y });
+                try visitedCells.put(.{ .x = x, .y = y }, {});
+            }
+        }
+
+        // check left
+        if (lowestX > 0) {
+            const x = lowestX - 1;
+            const y = lowestY;
+            tiles[y][x].options = newAdjacent(selected, .Left);
+            const entropy = try updateEntropy(tiles[y][x]);
+            tiles[y][x].entropy = entropy;
+
+            for (entropyRecords.items, 0..) |enRec, i| {
+                if (enRec.x == x and enRec.y == y) {
+                    entropyRecords.items[i].entropy = entropy;
+                }
+            }
+
+            if (!checkVisited(&visitedCells, x, y)) {
+                try entropyRecords.append(.{ .entropy = entropy, .x = x, .y = y });
+                try visitedCells.put(.{ .x = x, .y = y }, {});
+            }
+        }
+
+        try bw_writer.writeAll(ANSI_CURSOR_HOME);
+
+        for (0..height) |y| {
+            for (0..width) |x| {
+                const tile = tiles[y][x].collapsed;
+                try bw_writer.writeAll(tile.ansi);
+                try bw_writer.writeAll(tile.char);
+                try bw_writer.writeAll(ANSI_COLOR_RESET);
+            }
+            try bw_writer.writeByte('\n');
+        }
+        try bw_writer.writeByte('\n');
+
+        tiles[lowestY][lowestX].collapsed = selected;
+        collapsedTotal += 1;
+
+        //print lowestX and lowestY
+        // try bw_writer.print("tile options: {any}\n", .{tiles[lowestY][lowestX].options});
+        for (t.options) |y| {
+            try bw_writer.print("tile options: {s}\n", .{y.char});
+        }
+        try bw_writer.print("LowestX: {d}\n", .{lowestX});
+        try bw_writer.print("LowestY: {d}\n", .{lowestY});
+        try bw_writer.print("Selected: {s}\n", .{tiles[lowestY][lowestX].collapsed.char});
         try bw_writer.print("Entropy records length: {d}\n", .{entropyRecords.items.len});
-        std.time.sleep(2 * std.time.ns_per_ms);
+        try bw_writer.print("Collapsed total: {d}\n", .{collapsedTotal});
+        // std.time.sleep(9 * std.time.ns_per_ms);
     }
 
     try bw.flush();
