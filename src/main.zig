@@ -18,7 +18,7 @@ const ANSI_CLEAR_SCREEN = "\x1b[2J";
 const land = Spline{
     .char = "l",
     .ansi = ANSI_COLOR_GREEN,
-    .weight = 40,
+    .weight = 20,
 };
 
 const coast = Spline{
