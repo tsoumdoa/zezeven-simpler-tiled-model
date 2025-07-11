@@ -18,18 +18,18 @@ const ANSI_CLEAR_SCREEN = "\x1b[2J";
 const land = Spline{
     .char = "l",
     .ansi = ANSI_COLOR_GREEN,
-    .weight = 20,
+    .weight = 40,
 };
 
 const coast = Spline{
     .char = "c",
     .ansi = ANSI_COLOR_YELLOW,
-    .weight = 20,
+    .weight = 10,
 };
 const sea = Spline{
     .char = "s",
     .ansi = ANSI_COLOR_BLUE,
-    .weight = 10,
+    .weight = 40,
 };
 
 const empty = Spline{
@@ -95,10 +95,10 @@ pub inline fn newAdjacent(tile: *const Spline, orientation: Orientation) [3]*con
 
     if (tile.char[0] == 'c') {
         switch (orientation) {
-            .Top => adj = [_]*const Spline{ &land, &coast, &empty },
+            .Top => adj = [_]*const Spline{ &land, &empty, &empty },
             .Right => adj = [_]*const Spline{ &coast, &sea, &empty },
-            .Bottom => adj = [_]*const Spline{ &coast, &sea, &empty },
-            .Left => adj = [_]*const Spline{ &land, &coast, &empty },
+            .Bottom => adj = [_]*const Spline{ &empty, &sea, &empty },
+            .Left => adj = [_]*const Spline{ &land, &empty, &empty },
         }
     }
 
@@ -158,12 +158,6 @@ pub inline fn checkTile(
         const entropy = try updateEntropy(tiles[y][x]);
         tiles[y][x].entropy = entropy;
 
-        for (entropyRecords.items, 0..) |enRec, i| {
-            if (enRec.x == x and enRec.y == y) {
-                entropyRecords.items[i].entropy = entropy;
-            }
-        }
-
         try entropyRecords.append(.{ .entropy = entropy, .x = x, .y = y });
         try visitedCells.put(.{ .x = x, .y = y }, {});
     }
@@ -173,7 +167,6 @@ pub fn main() !void {
     const width = 60;
     const height = 20;
     var collapsed: u32 = 0;
-    var lowestEntropy: f32 = std.math.floatMax(f32);
     var lowestX: usize = 0;
     var lowestY: usize = 0;
     var collapsedTotal: u32 = 0;
@@ -197,6 +190,7 @@ pub fn main() !void {
 
     while (true) {
         _ = prng.next();
+        const rand = prng.random();
 
         // initiate tiles
         var tiles: [height][width]Tile = @splat(@splat(.init));
@@ -206,14 +200,12 @@ pub fn main() !void {
         try entropyRecords.append(.{ .entropy = 0, .x = lowestX, .y = lowestY });
 
         while (collapsed < (width * height) or entropyRecords.items.len != 0) : (collapsed += 1) {
-            const rand = prng.random();
             const enRecItems = entropyRecords.items;
             std.mem.sort(EntropyRecord, enRecItems, {}, struct {
                 fn lessThan(_: void, a: EntropyRecord, b: EntropyRecord) bool {
                     return a.entropy < b.entropy;
                 }
             }.lessThan);
-            lowestEntropy = enRecItems[0].entropy;
             lowestX = enRecItems[0].x;
             lowestY = enRecItems[0].y;
             const t = tiles[lowestY][lowestX];
@@ -268,21 +260,16 @@ pub fn main() !void {
             }
             try bw_writer.writeByte('\n');
 
-            //print lowestX and lowestY
-            // try bw_writer.print("tile options: {any}\n", .{tiles[lowestY][lowestX].options});
-            for (t.options) |y| {
-                try bw_writer.print("tile options: {s}\n", .{y.char});
-            }
-            try bw_writer.print("LowestX: {d}\n", .{lowestX});
-            try bw_writer.print("LowestY: {d}\n", .{lowestY});
             try bw_writer.print("Selected: {s}\n", .{tiles[lowestY][lowestX].collapsed.char});
             try bw_writer.print("Entropy records length: {d}\n", .{entropyRecords.items.len});
             try bw_writer.print("Collapsed total: {d}\n", .{collapsedTotal});
         }
 
         try bw.flush();
-        std.time.sleep(300 * std.time.ns_per_ms);
+        std.time.sleep(500 * std.time.ns_per_ms);
         visitedCells.clearRetainingCapacity();
         entropyRecords.clearRetainingCapacity();
+        lowestX = rand.intRangeAtMost(usize, 0, (width - 1) / 2);
+        lowestY = rand.intRangeAtMost(usize, 0, (height - 1) / 2);
     }
 }
